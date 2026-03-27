@@ -244,7 +244,7 @@ func TestPollInbound(t *testing.T) {
 	s.StoreInbound(&Message{DomainID: dom.ID, From: "a@b.com", To: []string{"x@poll.test"}, Subject: "First", BodyText: "1"})
 	s.StoreInbound(&Message{DomainID: dom.ID, From: "a@b.com", To: []string{"x@poll.test"}, Subject: "Second", BodyText: "2"})
 
-	msgs, err := s.PollInbound(dom.ID, 10)
+	msgs, err := s.PollInbound(dom.ID, "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +263,7 @@ func TestPollInboundOnlyUndelivered(t *testing.T) {
 	// Ack the first
 	s.AckMessages(dom.ID, []string{msg1.ID})
 
-	msgs, err := s.PollInbound(dom.ID, 10)
+	msgs, err := s.PollInbound(dom.ID, "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,6 +349,150 @@ func TestListMessagesLimit(t *testing.T) {
 	msgs, _ := s.ListMessages(MessageListOpts{DomainID: dom.ID, Limit: 2})
 	if len(msgs) != 2 {
 		t.Errorf("len = %d, want 2", len(msgs))
+	}
+}
+
+// --- Addresses ---
+
+func TestCreateAddress(t *testing.T) {
+	s := testStore(t)
+	dom, _ := s.CreateDomain("addr.test")
+
+	addr, err := s.CreateAddress(dom.ID, "agent", "My Agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addr.LocalPart != "agent" {
+		t.Errorf("local_part = %q, want agent", addr.LocalPart)
+	}
+	if addr.Address != "agent@addr.test" {
+		t.Errorf("address = %q, want agent@addr.test", addr.Address)
+	}
+	if addr.Label != "My Agent" {
+		t.Errorf("label = %q", addr.Label)
+	}
+}
+
+func TestCreateAddressDuplicate(t *testing.T) {
+	s := testStore(t)
+	dom, _ := s.CreateDomain("dup.test")
+
+	s.CreateAddress(dom.ID, "agent", "")
+	_, err := s.CreateAddress(dom.ID, "agent", "")
+	if err == nil {
+		t.Error("expected error for duplicate address")
+	}
+}
+
+func TestListAddresses(t *testing.T) {
+	s := testStore(t)
+	dom, _ := s.CreateDomain("listaddr.test")
+
+	s.CreateAddress(dom.ID, "alice", "")
+	s.CreateAddress(dom.ID, "bob", "")
+
+	addrs, err := s.ListAddresses(dom.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(addrs) != 2 {
+		t.Errorf("len = %d, want 2", len(addrs))
+	}
+}
+
+func TestDeleteAddress(t *testing.T) {
+	s := testStore(t)
+	dom, _ := s.CreateDomain("deladdr.test")
+
+	addr, _ := s.CreateAddress(dom.ID, "temp", "")
+	s.DeleteAddress(addr.ID)
+
+	got, _ := s.GetAddress(addr.ID)
+	if got != nil {
+		t.Error("expected address to be deleted")
+	}
+}
+
+func TestValidateAddress(t *testing.T) {
+	s := testStore(t)
+	dom, _ := s.CreateDomain("valid.test")
+	s.CreateAddress(dom.ID, "agent", "")
+
+	// Valid address
+	addr, d, err := s.ValidateAddress("agent@valid.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addr == nil {
+		t.Fatal("expected address to be found")
+	}
+	if d == nil {
+		t.Fatal("expected domain to be found")
+	}
+	if addr.LocalPart != "agent" {
+		t.Errorf("local_part = %q", addr.LocalPart)
+	}
+
+	// Valid domain, unknown address
+	addr, d, err = s.ValidateAddress("nobody@valid.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addr != nil {
+		t.Error("expected nil address for unknown local part")
+	}
+	if d == nil {
+		t.Error("expected domain to still be found")
+	}
+
+	// Unknown domain
+	addr, d, err = s.ValidateAddress("x@nope.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addr != nil || d != nil {
+		t.Error("expected nil for unknown domain")
+	}
+}
+
+func TestHasAddresses(t *testing.T) {
+	s := testStore(t)
+	dom, _ := s.CreateDomain("hasaddr.test")
+
+	has, _ := s.HasAddresses(dom.ID)
+	if has {
+		t.Error("expected no addresses initially")
+	}
+
+	s.CreateAddress(dom.ID, "agent", "")
+	has, _ = s.HasAddresses(dom.ID)
+	if !has {
+		t.Error("expected addresses after creating one")
+	}
+}
+
+func TestPollInboundByAddress(t *testing.T) {
+	s := testStore(t)
+	dom, _ := s.CreateDomain("polladdr.test")
+	addr1, _ := s.CreateAddress(dom.ID, "alice", "")
+	addr2, _ := s.CreateAddress(dom.ID, "bob", "")
+
+	s.StoreInbound(&Message{DomainID: dom.ID, AddressID: addr1.ID, From: "x@y.com", To: []string{"alice@polladdr.test"}, Subject: "For Alice", BodyText: "1"})
+	s.StoreInbound(&Message{DomainID: dom.ID, AddressID: addr2.ID, From: "x@y.com", To: []string{"bob@polladdr.test"}, Subject: "For Bob", BodyText: "2"})
+
+	// Poll all
+	all, _ := s.PollInbound(dom.ID, "", 10)
+	if len(all) != 2 {
+		t.Errorf("all = %d, want 2", len(all))
+	}
+
+	// Poll by address
+	alice, _ := s.PollInbound(dom.ID, addr1.ID, 10)
+	if len(alice) != 1 {
+		t.Errorf("alice = %d, want 1", len(alice))
+	}
+	if alice[0].Subject != "For Alice" {
+		t.Errorf("subject = %q", alice[0].Subject)
 	}
 }
 

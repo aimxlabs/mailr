@@ -59,15 +59,20 @@ func (s *session) Mail(from string, opts *smtp.MailOptions) error {
 }
 
 func (s *session) Rcpt(to string, opts *smtp.RcptOptions) error {
-	// Extract domain from recipient and check we handle it
-	parts := strings.SplitN(to, "@", 2)
-	if len(parts) != 2 {
-		return fmt.Errorf("invalid address: %s", to)
+	addr, dom, err := s.store.ValidateAddress(to)
+	if err != nil {
+		return fmt.Errorf("lookup failed: %s", to)
 	}
-	d, err := s.store.GetDomainByName(parts[1])
-	if err != nil || d == nil {
-		return fmt.Errorf("domain not handled: %s", parts[1])
+	if dom == nil {
+		return fmt.Errorf("domain not handled: %s", to)
 	}
+
+	// If domain has registered addresses, require a match
+	hasAddrs, _ := s.store.HasAddresses(dom.ID)
+	if hasAddrs && addr == nil {
+		return fmt.Errorf("address not registered: %s", to)
+	}
+
 	s.to = append(s.to, to)
 	return nil
 }
@@ -97,11 +102,13 @@ func (s *session) Data(r io.Reader) error {
 
 	bodyText, bodyHTML := extractBodies(parsed)
 
-	// Store per recipient domain
+	// Store per recipient, resolving address
+	seen := map[string]bool{} // dedupe by domain
 	for _, rcpt := range s.to {
-		parts := strings.SplitN(rcpt, "@", 2)
-		dom, _ := s.store.GetDomainByName(parts[1])
+		addr, dom, _ := s.store.ValidateAddress(rcpt)
 		if dom == nil { continue }
+		if seen[dom.ID] { continue }
+		seen[dom.ID] = true
 
 		msg := &store.Message{
 			DomainID:  dom.ID,
@@ -114,10 +121,12 @@ func (s *session) Data(r io.Reader) error {
 			BodyHTML:  bodyHTML,
 			RawData:   string(raw),
 		}
+		if addr != nil {
+			msg.AddressID = addr.ID
+		}
 		if _, err := s.store.StoreInbound(msg); err != nil {
 			log.Printf("smtp: failed to store message for %s: %v", rcpt, err)
 		}
-		break // one copy per domain, not per recipient
 	}
 
 	return nil

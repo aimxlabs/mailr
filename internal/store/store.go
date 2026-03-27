@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,6 +52,19 @@ var migrations = []string{
 		status      TEXT DEFAULT 'pending'
 	);
 	CREATE INDEX IF NOT EXISTS idx_queue_pending ON outbound_queue(status, next_retry);`,
+
+	// Migration 2: addresses
+	`CREATE TABLE IF NOT EXISTS addresses (
+		id          TEXT PRIMARY KEY,
+		domain_id   TEXT NOT NULL REFERENCES domains(id),
+		local_part  TEXT NOT NULL,
+		label       TEXT DEFAULT '',
+		created_at  TEXT NOT NULL
+	);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_addr_full ON addresses(domain_id, local_part);
+	CREATE INDEX IF NOT EXISTS idx_addr_domain ON addresses(domain_id);
+
+	ALTER TABLE messages ADD COLUMN address_id TEXT DEFAULT '';`,
 }
 
 type Store struct {
@@ -71,6 +85,7 @@ type Domain struct {
 type Message struct {
 	ID          string   `json:"id"`
 	DomainID    string   `json:"domain_id"`
+	AddressID   string   `json:"address_id,omitempty"`
 	MessageID   string   `json:"message_id,omitempty"`
 	Direction   string   `json:"direction"`
 	From        string   `json:"from"`
@@ -83,6 +98,15 @@ type Message struct {
 	Status      string   `json:"status"`
 	ReceivedAt  string   `json:"received_at"`
 	DeliveredAt string   `json:"delivered_at,omitempty"`
+}
+
+type Address struct {
+	ID        string `json:"id"`
+	DomainID  string `json:"domain_id"`
+	LocalPart string `json:"local_part"`
+	Address   string `json:"address"` // computed: local_part@domain
+	Label     string `json:"label,omitempty"`
+	CreatedAt string `json:"created_at"`
 }
 
 type QueueEntry struct {
@@ -176,6 +200,95 @@ func (s *Store) SetDKIM(id, privateKey, selector string) error {
 	return err
 }
 
+// --- Addresses ---
+
+func (s *Store) CreateAddress(domainID, localPart, label string) (*Address, error) {
+	// Look up domain name for the computed address field
+	dom, err := s.GetDomain(domainID)
+	if err != nil { return nil, err }
+	if dom == nil { return nil, fmt.Errorf("domain not found: %s", domainID) }
+
+	a := &Address{
+		ID:        newID("addr_"),
+		DomainID:  domainID,
+		LocalPart: localPart,
+		Address:   localPart + "@" + dom.Name,
+		Label:     label,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	_, err = s.DB.Exec(
+		`INSERT INTO addresses (id,domain_id,local_part,label,created_at) VALUES (?,?,?,?,?)`,
+		a.ID, a.DomainID, a.LocalPart, a.Label, a.CreatedAt,
+	)
+	if err != nil { return nil, fmt.Errorf("creating address: %w", err) }
+	return a, nil
+}
+
+func (s *Store) GetAddress(id string) (*Address, error) {
+	a := &Address{}
+	var domainName string
+	err := s.DB.QueryRow(
+		`SELECT a.id, a.domain_id, a.local_part, a.label, a.created_at, d.name
+		 FROM addresses a JOIN domains d ON d.id = a.domain_id WHERE a.id=?`, id,
+	).Scan(&a.ID, &a.DomainID, &a.LocalPart, &a.Label, &a.CreatedAt, &domainName)
+	if err == sql.ErrNoRows { return nil, nil }
+	if err != nil { return nil, err }
+	a.Address = a.LocalPart + "@" + domainName
+	return a, nil
+}
+
+func (s *Store) ListAddresses(domainID string) ([]Address, error) {
+	rows, err := s.DB.Query(
+		`SELECT a.id, a.domain_id, a.local_part, a.label, a.created_at, d.name
+		 FROM addresses a JOIN domains d ON d.id = a.domain_id
+		 WHERE a.domain_id=? ORDER BY a.local_part`, domainID,
+	)
+	if err != nil { return nil, err }
+	defer rows.Close()
+	var result []Address
+	for rows.Next() {
+		var a Address
+		var domainName string
+		rows.Scan(&a.ID, &a.DomainID, &a.LocalPart, &a.Label, &a.CreatedAt, &domainName)
+		a.Address = a.LocalPart + "@" + domainName
+		result = append(result, a)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) DeleteAddress(id string) error {
+	_, err := s.DB.Exec("DELETE FROM addresses WHERE id=?", id)
+	return err
+}
+
+// ValidateAddress checks if a full email address (local@domain) is registered.
+// Returns the address and domain if valid, nil if not.
+func (s *Store) ValidateAddress(email string) (*Address, *Domain, error) {
+	parts := strings.SplitN(email, "@", 2)
+	if len(parts) != 2 { return nil, nil, nil }
+
+	dom, err := s.GetDomainByName(parts[1])
+	if err != nil || dom == nil { return nil, nil, err }
+
+	a := &Address{}
+	err = s.DB.QueryRow(
+		`SELECT id, domain_id, local_part, label, created_at FROM addresses WHERE domain_id=? AND local_part=?`,
+		dom.ID, parts[0],
+	).Scan(&a.ID, &a.DomainID, &a.LocalPart, &a.Label, &a.CreatedAt)
+	if err == sql.ErrNoRows { return nil, dom, nil }
+	if err != nil { return nil, nil, err }
+	a.Address = email
+	return a, dom, nil
+}
+
+// HasAddresses checks if a domain has any registered addresses.
+// Domains with no addresses accept all mail (catch-all for backwards compat).
+func (s *Store) HasAddresses(domainID string) (bool, error) {
+	var count int
+	err := s.DB.QueryRow("SELECT COUNT(*) FROM addresses WHERE domain_id=?", domainID).Scan(&count)
+	return count > 0, err
+}
+
 // --- Messages ---
 
 func (s *Store) StoreInbound(msg *Message) (*Message, error) {
@@ -189,9 +302,9 @@ func (s *Store) StoreInbound(msg *Message) (*Message, error) {
 	toJSON, _ := json.Marshal(msg.To)
 	ccJSON, _ := json.Marshal(msg.Cc)
 	_, err := s.DB.Exec(
-		`INSERT INTO messages (id,domain_id,message_id,direction,from_addr,to_addrs,cc_addrs,subject,body_text,body_html,raw_data,status,received_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		msg.ID, msg.DomainID, msg.MessageID, msg.Direction, msg.From,
+		`INSERT INTO messages (id,domain_id,address_id,message_id,direction,from_addr,to_addrs,cc_addrs,subject,body_text,body_html,raw_data,status,received_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		msg.ID, msg.DomainID, msg.AddressID, msg.MessageID, msg.Direction, msg.From,
 		string(toJSON), string(ccJSON), msg.Subject, msg.BodyText, msg.BodyHTML,
 		msg.RawData, msg.Status, msg.ReceivedAt,
 	)
@@ -217,9 +330,9 @@ func (s *Store) StoreOutbound(msg *Message) (*Message, error) {
 	toJSON, _ := json.Marshal(msg.To)
 	ccJSON, _ := json.Marshal(msg.Cc)
 	_, err := s.DB.Exec(
-		`INSERT INTO messages (id,domain_id,message_id,direction,from_addr,to_addrs,cc_addrs,subject,body_text,body_html,raw_data,status,received_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		msg.ID, msg.DomainID, msg.MessageID, msg.Direction, msg.From,
+		`INSERT INTO messages (id,domain_id,address_id,message_id,direction,from_addr,to_addrs,cc_addrs,subject,body_text,body_html,raw_data,status,received_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		msg.ID, msg.DomainID, msg.AddressID, msg.MessageID, msg.Direction, msg.From,
 		string(toJSON), string(ccJSON), msg.Subject, msg.BodyText, msg.BodyHTML,
 		msg.RawData, msg.Status, msg.ReceivedAt,
 	)
@@ -241,9 +354,9 @@ func (s *Store) GetMessage(id string) (*Message, error) {
 	m := &Message{}
 	var toJSON, ccJSON string
 	err := s.DB.QueryRow(
-		`SELECT id,domain_id,message_id,direction,from_addr,to_addrs,cc_addrs,subject,body_text,body_html,status,received_at,COALESCE(delivered_at,'')
+		`SELECT id,domain_id,COALESCE(address_id,''),message_id,direction,from_addr,to_addrs,cc_addrs,subject,body_text,body_html,status,received_at,COALESCE(delivered_at,'')
 		 FROM messages WHERE id=?`, id,
-	).Scan(&m.ID, &m.DomainID, &m.MessageID, &m.Direction, &m.From,
+	).Scan(&m.ID, &m.DomainID, &m.AddressID, &m.MessageID, &m.Direction, &m.From,
 		&toJSON, &ccJSON, &m.Subject, &m.BodyText, &m.BodyHTML,
 		&m.Status, &m.ReceivedAt, &m.DeliveredAt)
 	if err == sql.ErrNoRows { return nil, nil }
@@ -255,13 +368,18 @@ func (s *Store) GetMessage(id string) (*Message, error) {
 	return m, nil
 }
 
-func (s *Store) PollInbound(domainID string, limit int) ([]Message, error) {
+func (s *Store) PollInbound(domainID, addressID string, limit int) ([]Message, error) {
 	if limit <= 0 { limit = 50 }
-	rows, err := s.DB.Query(
-		`SELECT id,domain_id,message_id,direction,from_addr,to_addrs,cc_addrs,subject,body_text,body_html,status,received_at,COALESCE(delivered_at,'')
-		 FROM messages WHERE domain_id=? AND direction='inbound' AND status='received'
-		 ORDER BY received_at ASC LIMIT ?`, domainID, limit,
-	)
+	q := `SELECT id,domain_id,COALESCE(address_id,''),message_id,direction,from_addr,to_addrs,cc_addrs,subject,body_text,body_html,status,received_at,COALESCE(delivered_at,'')
+		 FROM messages WHERE domain_id=? AND direction='inbound' AND status='received'`
+	args := []interface{}{domainID}
+	if addressID != "" {
+		q += " AND address_id=?"
+		args = append(args, addressID)
+	}
+	q += " ORDER BY received_at ASC LIMIT ?"
+	args = append(args, limit)
+	rows, err := s.DB.Query(q, args...)
 	if err != nil { return nil, err }
 	defer rows.Close()
 	return scanMessages(rows)
@@ -284,16 +402,18 @@ func (s *Store) AckMessages(domainID string, ids []string) (int, error) {
 
 type MessageListOpts struct {
 	DomainID  string
+	AddressID string
 	Direction string
 	Status    string
 	Limit     int
 }
 
 func (s *Store) ListMessages(opts MessageListOpts) ([]Message, error) {
-	q := `SELECT id,domain_id,message_id,direction,from_addr,to_addrs,cc_addrs,subject,body_text,body_html,status,received_at,COALESCE(delivered_at,'')
+	q := `SELECT id,domain_id,COALESCE(address_id,''),message_id,direction,from_addr,to_addrs,cc_addrs,subject,body_text,body_html,status,received_at,COALESCE(delivered_at,'')
 	      FROM messages WHERE 1=1`
 	var args []interface{}
 	if opts.DomainID != "" { q += " AND domain_id=?"; args = append(args, opts.DomainID) }
+	if opts.AddressID != "" { q += " AND address_id=?"; args = append(args, opts.AddressID) }
 	if opts.Direction != "" { q += " AND direction=?"; args = append(args, opts.Direction) }
 	if opts.Status != "" { q += " AND status=?"; args = append(args, opts.Status) }
 	q += " ORDER BY received_at DESC"
@@ -310,7 +430,7 @@ func scanMessages(rows *sql.Rows) ([]Message, error) {
 	for rows.Next() {
 		var m Message
 		var toJSON, ccJSON string
-		rows.Scan(&m.ID, &m.DomainID, &m.MessageID, &m.Direction, &m.From,
+		rows.Scan(&m.ID, &m.DomainID, &m.AddressID, &m.MessageID, &m.Direction, &m.From,
 			&toJSON, &ccJSON, &m.Subject, &m.BodyText, &m.BodyHTML,
 			&m.Status, &m.ReceivedAt, &m.DeliveredAt)
 		json.Unmarshal([]byte(toJSON), &m.To)

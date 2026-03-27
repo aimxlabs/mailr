@@ -44,6 +44,9 @@ func NewServer(s *store.Store) *Server {
 		r.Post("/domains/{id}/dkim/generate", srv.requireAdmin(srv.handleDKIMGenerate))
 
 		// Client endpoints (domain token auth)
+		r.Post("/domains/{id}/addresses", srv.requireDomainToken(srv.handleAddressCreate))
+		r.Get("/domains/{id}/addresses", srv.requireDomainToken(srv.handleAddressList))
+		r.Delete("/domains/{id}/addresses/{aid}", srv.requireDomainToken(srv.handleAddressDelete))
 		r.Get("/domains/{id}/messages/poll", srv.requireDomainToken(srv.handlePoll))
 		r.Post("/domains/{id}/messages/ack", srv.requireDomainToken(srv.handleAck))
 		r.Post("/domains/{id}/send", srv.requireDomainToken(srv.handleSend))
@@ -182,11 +185,52 @@ func (s *Server) handleDKIMGenerate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// --- Address Handlers ---
+
+func (s *Server) handleAddressCreate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		LocalPart string `json:"local_part"`
+		Label     string `json:"label"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "Invalid JSON")
+		return
+	}
+	if req.LocalPart == "" {
+		writeError(w, 400, "local_part is required")
+		return
+	}
+	addr, err := s.store.CreateAddress(chi.URLParam(r, "id"), req.LocalPart, req.Label)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 201, addr)
+}
+
+func (s *Server) handleAddressList(w http.ResponseWriter, r *http.Request) {
+	result, err := s.store.ListAddresses(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, result)
+}
+
+func (s *Server) handleAddressDelete(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.DeleteAddress(chi.URLParam(r, "aid")); err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]string{"deleted": chi.URLParam(r, "aid")})
+}
+
 // --- Message Handlers ---
 
 func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	msgs, err := s.store.PollInbound(chi.URLParam(r, "id"), limit)
+	addressID := r.URL.Query().Get("address_id")
+	msgs, err := s.store.PollInbound(chi.URLParam(r, "id"), addressID, limit)
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
@@ -253,6 +297,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMessageList(w http.ResponseWriter, r *http.Request) {
 	opts := store.MessageListOpts{
 		DomainID:  chi.URLParam(r, "id"),
+		AddressID: r.URL.Query().Get("address_id"),
 		Direction: r.URL.Query().Get("direction"),
 		Status:    r.URL.Query().Get("status"),
 	}

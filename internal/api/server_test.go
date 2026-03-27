@@ -345,6 +345,93 @@ func TestMessageGetNotFound(t *testing.T) {
 	}
 }
 
+// --- Addresses ---
+
+func TestAddressCreate(t *testing.T) {
+	srv, st := testServer(t)
+	dom, _ := st.CreateDomain("addr.test")
+
+	w := doJSON(t, srv, "POST", "/api/domains/"+dom.ID+"/addresses", map[string]interface{}{
+		"local_part": "agent",
+		"label":      "My Agent",
+	}, dom.AuthToken)
+
+	if w.Code != 201 {
+		t.Errorf("status = %d, want 201", w.Code)
+	}
+	body := decodeBody(t, w)
+	if body["local_part"] != "agent" {
+		t.Errorf("local_part = %v", body["local_part"])
+	}
+	if body["address"] != "agent@addr.test" {
+		t.Errorf("address = %v", body["address"])
+	}
+}
+
+func TestAddressCreateMissingLocalPart(t *testing.T) {
+	srv, st := testServer(t)
+	dom, _ := st.CreateDomain("addrval.test")
+
+	w := doJSON(t, srv, "POST", "/api/domains/"+dom.ID+"/addresses", map[string]interface{}{}, dom.AuthToken)
+	if w.Code != 400 {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestAddressList(t *testing.T) {
+	srv, st := testServer(t)
+	dom, _ := st.CreateDomain("addrlist.test")
+	st.CreateAddress(dom.ID, "alice", "")
+	st.CreateAddress(dom.ID, "bob", "")
+
+	w := doJSON(t, srv, "GET", "/api/domains/"+dom.ID+"/addresses", nil, dom.AuthToken)
+	if w.Code != 200 {
+		t.Fatalf("status = %d", w.Code)
+	}
+	var addrs []map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&addrs)
+	if len(addrs) != 2 {
+		t.Errorf("len = %d, want 2", len(addrs))
+	}
+}
+
+func TestAddressDelete(t *testing.T) {
+	srv, st := testServer(t)
+	dom, _ := st.CreateDomain("addrdel.test")
+	addr, _ := st.CreateAddress(dom.ID, "temp", "")
+
+	w := doJSON(t, srv, "DELETE", "/api/domains/"+dom.ID+"/addresses/"+addr.ID, nil, dom.AuthToken)
+	if w.Code != 200 {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+
+	got, _ := st.GetAddress(addr.ID)
+	if got != nil {
+		t.Error("expected address to be deleted")
+	}
+}
+
+func TestPollByAddress(t *testing.T) {
+	srv, st := testServer(t)
+	dom, _ := st.CreateDomain("polladdr.test")
+	addr, _ := st.CreateAddress(dom.ID, "agent", "")
+
+	st.StoreInbound(&store.Message{DomainID: dom.ID, AddressID: addr.ID, From: "x@y.com", To: []string{"agent@polladdr.test"}, Subject: "For agent", BodyText: "1"})
+	st.StoreInbound(&store.Message{DomainID: dom.ID, From: "x@y.com", To: []string{"other@polladdr.test"}, Subject: "For other", BodyText: "2"})
+
+	// Poll with address filter
+	req := httptest.NewRequest("GET", "/api/domains/"+dom.ID+"/messages/poll?address_id="+addr.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+dom.AuthToken)
+	w := httptest.NewRecorder()
+	srv.Router.ServeHTTP(w, req)
+
+	body := decodeBody(t, w)
+	msgs := body["messages"].([]interface{})
+	if len(msgs) != 1 {
+		t.Errorf("filtered poll = %d, want 1", len(msgs))
+	}
+}
+
 // --- DKIM Generate ---
 
 func TestDKIMGenerate(t *testing.T) {
