@@ -1,18 +1,25 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 
+	hello "github.com/aimxlabs/hello-message-go"
 	"github.com/garett/mailr/internal/relay"
 	"github.com/garett/mailr/internal/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 )
+
+type contextKey string
+
+const domainContextKey contextKey = "domain"
 
 type Server struct {
 	Router   *chi.Mux
@@ -52,6 +59,11 @@ func NewServer(s *store.Store) *Server {
 		r.Post("/domains/{id}/send", srv.requireDomainToken(srv.handleSend))
 		r.Get("/domains/{id}/messages", srv.requireDomainToken(srv.handleMessageList))
 		r.Get("/domains/{id}/messages/{mid}", srv.requireDomainToken(srv.handleMessageGet))
+
+		// Hello-message authenticated send — no domain token needed,
+		// domain is derived from the from address, sender must prove
+		// ownership of the Ethereum key bound to that address.
+		r.Post("/send", srv.handleHelloSend)
 	})
 
 	srv.Router.Get("/ws", srv.handleWS)
@@ -105,8 +117,14 @@ func (s *Server) requireDomainToken(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, 401, "Unauthorized")
 			return
 		}
-		next(w, r)
+		ctx := context.WithValue(r.Context(), domainContextKey, dom)
+		next(w, r.WithContext(ctx))
 	}
+}
+
+func domainFromContext(r *http.Request) *store.Domain {
+	dom, _ := r.Context().Value(domainContextKey).(*store.Domain)
+	return dom
 }
 
 // --- Domain Handlers ---
@@ -189,8 +207,9 @@ func (s *Server) handleDKIMGenerate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAddressCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		LocalPart string `json:"local_part"`
-		Label     string `json:"label"`
+		LocalPart       string `json:"local_part"`
+		Label           string `json:"label"`
+		EthereumAddress string `json:"ethereum_address"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "Invalid JSON")
@@ -200,7 +219,7 @@ func (s *Server) handleAddressCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "local_part is required")
 		return
 	}
-	addr, err := s.store.CreateAddress(chi.URLParam(r, "id"), req.LocalPart, req.Label)
+	addr, err := s.store.CreateAddress(chi.URLParam(r, "id"), req.LocalPart, req.Label, req.EthereumAddress)
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
@@ -277,8 +296,38 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Verify the from address belongs to the authenticated domain
+	dom := domainFromContext(r)
+	if dom != nil {
+		parts := strings.SplitN(req.From, "@", 2)
+		if len(parts) != 2 || !strings.EqualFold(parts[1], dom.Name) {
+			writeError(w, 403, "from address must belong to domain "+dom.Name)
+			return
+		}
+	}
+
+	// If the domain has registered addresses, verify the from address is one of them.
+	// Domains with no addresses allow any local-part (catch-all / backwards compat).
+	domainID := chi.URLParam(r, "id")
+	hasAddrs, err := s.store.HasAddresses(domainID)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	if hasAddrs {
+		addr, _, err := s.store.ValidateAddress(req.From)
+		if err != nil {
+			writeError(w, 500, err.Error())
+			return
+		}
+		if addr == nil {
+			writeError(w, 403, "address "+req.From+" is not registered — create it first via POST /api/domains/{id}/addresses")
+			return
+		}
+	}
+
 	msg := &store.Message{
-		DomainID: chi.URLParam(r, "id"),
+		DomainID: domainID,
 		From:     req.From,
 		To:       req.To,
 		Cc:       req.Cc,
@@ -292,6 +341,81 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 201, result)
+}
+
+func (s *Server) handleHelloSend(w http.ResponseWriter, r *http.Request) {
+	// 1. Extract and verify hello message from Authorization header
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) < 7 || authHeader[:6] != "Hello " {
+		writeError(w, 401, "Authorization header must use 'Hello <base64>' scheme")
+		return
+	}
+	helloMsg := authHeader[6:]
+
+	result := hello.VerifySignature(helloMsg)
+	if !result.Valid {
+		errMsg := "hello-message verification failed"
+		if result.Error != "" {
+			errMsg += ": " + result.Error
+		}
+		writeError(w, 401, errMsg)
+		return
+	}
+	recoveredAddress := strings.ToLower(result.Address)
+
+	// 2. Parse the send request
+	var req struct {
+		From     string   `json:"from"`
+		To       []string `json:"to"`
+		Cc       []string `json:"cc"`
+		Subject  string   `json:"subject"`
+		BodyText string   `json:"body_text"`
+		BodyHTML string   `json:"body_html"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "Invalid JSON")
+		return
+	}
+	if req.From == "" || len(req.To) == 0 || req.Subject == "" {
+		writeError(w, 400, "from, to, and subject are required")
+		return
+	}
+
+	// 3. Validate the from address is registered and bound to this Ethereum address
+	addr, dom, err := s.store.ValidateAddress(req.From)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	if addr == nil {
+		writeError(w, 403, "address "+req.From+" is not registered")
+		return
+	}
+	if addr.EthereumAddress == "" {
+		writeError(w, 403, "address "+req.From+" has no Ethereum address bound — cannot authenticate via hello-message")
+		return
+	}
+	if strings.ToLower(addr.EthereumAddress) != recoveredAddress {
+		writeError(w, 403, "hello-message signer "+recoveredAddress+" is not authorized to send from "+req.From)
+		return
+	}
+
+	// 4. Queue the message
+	msg := &store.Message{
+		DomainID: dom.ID,
+		From:     req.From,
+		To:       req.To,
+		Cc:       req.Cc,
+		Subject:  req.Subject,
+		BodyText: req.BodyText,
+		BodyHTML: req.BodyHTML,
+	}
+	stored, err := s.store.StoreOutbound(msg)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 201, stored)
 }
 
 func (s *Server) handleMessageList(w http.ResponseWriter, r *http.Request) {

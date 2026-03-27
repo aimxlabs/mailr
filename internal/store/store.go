@@ -65,6 +65,9 @@ var migrations = []string{
 	CREATE INDEX IF NOT EXISTS idx_addr_domain ON addresses(domain_id);
 
 	ALTER TABLE messages ADD COLUMN address_id TEXT DEFAULT '';`,
+
+	// Migration 3: ethereum address binding for hello-message auth
+	`ALTER TABLE addresses ADD COLUMN ethereum_address TEXT DEFAULT '';`,
 }
 
 type Store struct {
@@ -101,12 +104,13 @@ type Message struct {
 }
 
 type Address struct {
-	ID        string `json:"id"`
-	DomainID  string `json:"domain_id"`
-	LocalPart string `json:"local_part"`
-	Address   string `json:"address"` // computed: local_part@domain
-	Label     string `json:"label,omitempty"`
-	CreatedAt string `json:"created_at"`
+	ID              string `json:"id"`
+	DomainID        string `json:"domain_id"`
+	LocalPart       string `json:"local_part"`
+	Address         string `json:"address"` // computed: local_part@domain
+	Label           string `json:"label,omitempty"`
+	EthereumAddress string `json:"ethereum_address,omitempty"`
+	CreatedAt       string `json:"created_at"`
 }
 
 type QueueEntry struct {
@@ -202,23 +206,24 @@ func (s *Store) SetDKIM(id, privateKey, selector string) error {
 
 // --- Addresses ---
 
-func (s *Store) CreateAddress(domainID, localPart, label string) (*Address, error) {
+func (s *Store) CreateAddress(domainID, localPart, label, ethereumAddress string) (*Address, error) {
 	// Look up domain name for the computed address field
 	dom, err := s.GetDomain(domainID)
 	if err != nil { return nil, err }
 	if dom == nil { return nil, fmt.Errorf("domain not found: %s", domainID) }
 
 	a := &Address{
-		ID:        newID("addr_"),
-		DomainID:  domainID,
-		LocalPart: localPart,
-		Address:   localPart + "@" + dom.Name,
-		Label:     label,
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		ID:              newID("addr_"),
+		DomainID:        domainID,
+		LocalPart:       localPart,
+		Address:         localPart + "@" + dom.Name,
+		Label:           label,
+		EthereumAddress: strings.ToLower(ethereumAddress),
+		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
 	}
 	_, err = s.DB.Exec(
-		`INSERT INTO addresses (id,domain_id,local_part,label,created_at) VALUES (?,?,?,?,?)`,
-		a.ID, a.DomainID, a.LocalPart, a.Label, a.CreatedAt,
+		`INSERT INTO addresses (id,domain_id,local_part,label,ethereum_address,created_at) VALUES (?,?,?,?,?,?)`,
+		a.ID, a.DomainID, a.LocalPart, a.Label, a.EthereumAddress, a.CreatedAt,
 	)
 	if err != nil { return nil, fmt.Errorf("creating address: %w", err) }
 	return a, nil
@@ -228,9 +233,9 @@ func (s *Store) GetAddress(id string) (*Address, error) {
 	a := &Address{}
 	var domainName string
 	err := s.DB.QueryRow(
-		`SELECT a.id, a.domain_id, a.local_part, a.label, a.created_at, d.name
+		`SELECT a.id, a.domain_id, a.local_part, a.label, COALESCE(a.ethereum_address,''), a.created_at, d.name
 		 FROM addresses a JOIN domains d ON d.id = a.domain_id WHERE a.id=?`, id,
-	).Scan(&a.ID, &a.DomainID, &a.LocalPart, &a.Label, &a.CreatedAt, &domainName)
+	).Scan(&a.ID, &a.DomainID, &a.LocalPart, &a.Label, &a.EthereumAddress, &a.CreatedAt, &domainName)
 	if err == sql.ErrNoRows { return nil, nil }
 	if err != nil { return nil, err }
 	a.Address = a.LocalPart + "@" + domainName
@@ -239,7 +244,7 @@ func (s *Store) GetAddress(id string) (*Address, error) {
 
 func (s *Store) ListAddresses(domainID string) ([]Address, error) {
 	rows, err := s.DB.Query(
-		`SELECT a.id, a.domain_id, a.local_part, a.label, a.created_at, d.name
+		`SELECT a.id, a.domain_id, a.local_part, a.label, COALESCE(a.ethereum_address,''), a.created_at, d.name
 		 FROM addresses a JOIN domains d ON d.id = a.domain_id
 		 WHERE a.domain_id=? ORDER BY a.local_part`, domainID,
 	)
@@ -249,7 +254,7 @@ func (s *Store) ListAddresses(domainID string) ([]Address, error) {
 	for rows.Next() {
 		var a Address
 		var domainName string
-		rows.Scan(&a.ID, &a.DomainID, &a.LocalPart, &a.Label, &a.CreatedAt, &domainName)
+		rows.Scan(&a.ID, &a.DomainID, &a.LocalPart, &a.Label, &a.EthereumAddress, &a.CreatedAt, &domainName)
 		a.Address = a.LocalPart + "@" + domainName
 		result = append(result, a)
 	}
@@ -272,9 +277,9 @@ func (s *Store) ValidateAddress(email string) (*Address, *Domain, error) {
 
 	a := &Address{}
 	err = s.DB.QueryRow(
-		`SELECT id, domain_id, local_part, label, created_at FROM addresses WHERE domain_id=? AND local_part=?`,
+		`SELECT id, domain_id, local_part, label, COALESCE(ethereum_address,''), created_at FROM addresses WHERE domain_id=? AND local_part=?`,
 		dom.ID, parts[0],
-	).Scan(&a.ID, &a.DomainID, &a.LocalPart, &a.Label, &a.CreatedAt)
+	).Scan(&a.ID, &a.DomainID, &a.LocalPart, &a.Label, &a.EthereumAddress, &a.CreatedAt)
 	if err == sql.ErrNoRows { return nil, dom, nil }
 	if err != nil { return nil, nil, err }
 	a.Address = email
