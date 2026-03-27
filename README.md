@@ -298,6 +298,37 @@ curl -X POST http://localhost:4802/api/domains \
   -d '{"name": "localhost"}'
 ```
 
+## Integration with aiprod
+
+mailr is designed as the server-side relay for [aiprod](https://github.com/aimxlabs/aiprod)'s email system. Once mailr is deployed, configure aiprod to use it:
+
+```bash
+AIPROD_MAILR_URL=https://mail.example.com \
+AIPROD_MAILR_DOMAIN_ID=dom_abc123 \
+AIPROD_MAILR_AUTH_TOKEN=tok_xyz789 \
+./aiprod serve
+```
+
+In relay mode, aiprod:
+- Sends outbound email via mailr's `/api/domains/:id/send` endpoint (mailr handles DKIM signing and MX delivery)
+- Polls mailr every 15 seconds for inbound messages and stores them locally
+- Disables its own SMTP server (mailr handles port 25)
+- All existing `/api/v1/email/*` endpoints work identically — the relay is transparent to agents
+
+Agents can also register addresses via mailr's API so only mail to registered addresses is accepted:
+
+```bash
+# Register an address for an agent
+curl -X POST https://mail.example.com/api/domains/dom_abc123/addresses \
+  -H "Authorization: Bearer tok_xyz789" \
+  -H "Content-Type: application/json" \
+  -d '{"local_part": "deploy-agent", "label": "Deployment Agent"}'
+
+# Poll for just that agent's mail
+curl "https://mail.example.com/api/domains/dom_abc123/messages/poll?address_id=addr_..." \
+  -H "Authorization: Bearer tok_xyz789"
+```
+
 ## Architecture
 
 - **Language**: Go 1.26
