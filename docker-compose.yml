@@ -1,0 +1,32 @@
+services:
+  mailr:
+    build: .
+    volumes:
+      - mailr-data:/data
+    environment:
+      - MAILR_ADMIN_TOKEN=${MAILR_ADMIN_TOKEN}
+    command:
+      - serve
+      - --db=/data/mailr.db
+      - --http=:4802
+      - --smtp=:2525
+      - --domain=${MAILR_DOMAIN}
+    ports:
+      - "25:2525"
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy-data:/data
+    environment:
+      - MAILR_DOMAIN=${MAILR_DOMAIN}
+    restart: unless-stopped
+
+volumes:
+  mailr-data:
+  caddy-data:

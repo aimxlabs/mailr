@@ -1,0 +1,3 @@
+{$MAILR_DOMAIN} {
+	reverse_proxy mailr:4802
+}
