@@ -1,3 +1,5 @@
+github.com/aimxlabs/hello-message-go v0.0.0-20260327051629-d35d5f19e870 h1:xRPoQjIqVIWZPO0DSPFzDwxlwCOA5xFhcnTwPOhkey8=
+github.com/aimxlabs/hello-message-go v0.0.0-20260327051629-d35d5f19e870/go.mod h1:28ySUIeMHeGKGibZPZQ+x0W1dIEIg2zQ0mMjJeev9NE=
 github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=
 github.com/decred/dcrd/crypto/blake256 v1.0.0 h1:/8DMNYp9SGi5f0w7uCm6d6M4OU2rGFK09Y2A4Xv7EE0=
 github.com/decred/dcrd/crypto/blake256 v1.0.0/go.mod h1:sQl2p6Y26YV+ZOcSTP6thNdn47hh8kt6rqSlvmrXFAc=

@@ -60,6 +60,21 @@ func scpDownload(host, key, user, remotePath, localPath string) error {
 	return exec.Command("scp", args...).Run()
 }
 
+// rsyncUpload syncs a local directory to the remote host.
+func rsyncUpload(host, key, user, localDir, remoteDir string) error {
+	sshCmd := fmt.Sprintf("ssh -o StrictHostKeyChecking=no -i %s", key)
+	args := []string{
+		"-avz", "--exclude", ".git", "--exclude", "mailr",
+		"-e", sshCmd,
+		localDir + "/",
+		user + "@" + host + ":" + remoteDir + "/",
+	}
+	cmd := exec.Command("rsync", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
 // scpUpload copies a local file to remote.
 func scpUpload(host, key, user, localPath, remotePath string) error {
 	args := []string{

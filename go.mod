@@ -3,15 +3,13 @@ module github.com/garett/mailr
 go 1.26.1
 
 require (
-	github.com/aimxlabs/hello-message-go v0.0.0
+	github.com/aimxlabs/hello-message-go v0.0.0-20260327051629-d35d5f19e870
 	github.com/emersion/go-smtp v0.24.0
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/gorilla/websocket v1.5.3
 	github.com/spf13/cobra v1.10.2
 	modernc.org/sqlite v1.47.0
 )
-
-replace github.com/aimxlabs/hello-message-go => ../hello-message-go
 
 require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect

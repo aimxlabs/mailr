@@ -194,14 +194,25 @@ func newManageCmd() *cobra.Command {
 			h, k, u, d, err := requireRemote()
 			if err != nil { return err }
 
-			fmt.Println("Pulling latest code...")
-			out, _ := sshCapture(h, k, u, fmt.Sprintf("cd %s && git pull", d))
-			fmt.Println(out)
+			// Check if remote dir is a git repo; if so git pull, otherwise rsync local source
+			isGit, _ := sshCapture(h, k, u, fmt.Sprintf("test -d %s/.git && echo yes || echo no", d))
+			if strings.TrimSpace(isGit) == "yes" {
+				fmt.Println("Pulling latest code...")
+				out, _ := sshCapture(h, k, u, fmt.Sprintf("cd %s && git pull", d))
+				fmt.Println(out)
+			} else {
+				fmt.Println("No git repo on server, syncing local source...")
+				if err := rsyncUpload(h, k, u, ".", d); err != nil {
+					return fmt.Errorf("rsync failed: %w", err)
+				}
+				fmt.Println("Source synced.")
+			}
+			var out string
 
 			fmt.Println("Rebuilding...")
 			out, err = compose(h, k, u, d, "up -d --build")
-			if err != nil { return err }
 			fmt.Println(out)
+			if err != nil { return err }
 
 			sshCapture(h, k, u, "sudo docker image prune -f")
 
