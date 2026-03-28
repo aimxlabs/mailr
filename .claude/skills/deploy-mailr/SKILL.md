@@ -7,7 +7,7 @@ description: >-
   mailr, set up a mail relay, or get email working for their AI agents.
 disable-model-invocation: true
 argument-hint: "[provider]"
-allowed-tools: Bash(mailr *), Bash(go *), Bash(aws *), Bash(doctl *), Bash(curl *), Bash(dig *), Bash(ssh *), Bash(gh *), Bash(openssl *), Bash(nslookup *)
+allowed-tools: Bash(mailr *), Bash(go *), Bash(aws *), Bash(doctl *), Bash(curl *), Bash(dig *), Bash(ssh *), Bash(gh *), Bash(openssl *), Bash(nslookup *), Bash(rsync *)
 ---
 
 # Autonomous mailr Deployment
@@ -37,9 +37,18 @@ Do NOT ask about:
 
 ## Phase 2: Build and deploy the server
 
-First, ensure the mailr binary is built:
+First, handle the `hello-message-go` dependency if `go.mod` has a `replace` directive pointing to a local path (e.g. `../hello-message-go`). Replace it with the public module path so the build is self-contained:
 ```bash
-cd /path/to/mailr && go build -o mailr ./cmd/mailr
+cd /path/to/mailr
+# Remove local replace directive if present and use the public repo
+grep -q 'replace.*hello-message-go.*=>.*\.\./' go.mod && \
+  go mod edit -dropreplace github.com/aimxlabs/hello-message-go && \
+  go mod tidy
+```
+
+Then install the mailr CLI globally (into `$GOPATH/bin`) so it's on `$PATH`:
+```bash
+go install ./cmd/mailr
 ```
 
 **For AWS:**
@@ -145,10 +154,27 @@ for i in $(seq 1 30); do
 done
 ```
 
-If health checks time out, SSH in and check logs:
+If health checks time out, SSH in and check cloud-init logs proactively:
 ```bash
-ssh -i ~/.ssh/mailr-deploy-key.pem ubuntu@<PUBLIC_IP> 'tail -50 /var/log/cloud-init-output.log'
+ssh -i ~/.ssh/mailr-deploy-key.pem ubuntu@<PUBLIC_IP> 'tail -100 /var/log/cloud-init-output.log'
 ```
+
+### Fallback: rsync + remote build
+
+If cloud-init logs show a `git clone` failure (network issue, timeout, etc.), fall back to pushing the source directly and building on the server:
+
+```bash
+# Sync the mailr source to the server
+rsync -avz --exclude '.git' --exclude 'mailr' \
+  /path/to/mailr/ ubuntu@<PUBLIC_IP>:/opt/mailr-src/ \
+  -e "ssh -i ~/.ssh/mailr-deploy-key.pem"
+
+# Build and start on the server
+ssh -i ~/.ssh/mailr-deploy-key.pem ubuntu@<PUBLIC_IP> \
+  'cd /opt/mailr-src && docker compose up --build -d'
+```
+
+Then re-run the health check loop above.
 
 ---
 
@@ -173,6 +199,22 @@ curl -s -X POST "https://<DOMAIN>/api/domains" \
 ```
 
 Capture the **domain ID** and **auth token** from the response.
+
+### Configure mailr manage (non-interactive)
+
+Write the management config directly so `mailr manage` commands work without running the interactive `manage init`:
+
+```bash
+mkdir -p ~/.mailr
+cat > ~/.mailr/config.json <<CONF
+{
+  "remoteHost": "<PUBLIC_IP>",
+  "sshKey": "$HOME/.ssh/mailr-deploy-key.pem",
+  "sshUser": "ubuntu",
+  "remoteDir": "/opt/mailr"
+}
+CONF
+```
 
 ---
 
@@ -242,10 +284,9 @@ dig default._domainkey.<DOMAIN> TXT +short
 
 ### Test inbound (SMTP receiving)
 
-Send a test email to the server via SMTP:
+Send a test email **from the server itself** (most local networks block outbound port 25):
 ```bash
-# Use the server's SMTP port to send a test
-curl --url "smtp://<PUBLIC_IP>:25" \
+ssh -i ~/.ssh/mailr-deploy-key.pem ubuntu@<PUBLIC_IP> 'curl --url "smtp://127.0.0.1:25" \
   --mail-from "test@example.com" \
   --mail-rcpt "test@<DOMAIN>" \
   -T - <<EOF
@@ -255,8 +296,10 @@ Subject: mailr deployment test
 Date: $(date -R)
 
 This is a test email sent during mailr deployment.
-EOF
+EOF'
 ```
+
+> **Note:** If you attempt the SMTP test locally and it fails, the likely cause is your local network blocking outbound port 25 — not a server issue. Always test from the server first.
 
 Then check if it was received:
 ```bash
