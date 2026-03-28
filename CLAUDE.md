@@ -1,6 +1,6 @@
 # mailr — Claude Code project context
 
-Mail relay for AI agents. Receives inbound email via SMTP, delivers outbound email via MX lookup with DKIM signing, and exposes an HTTP API + WebSocket for aiprod clients to send/receive messages.
+Mail relay for AI agents. Receives inbound email via SMTP, delivers outbound email via MX lookup with DKIM signing, and exposes an HTTP API + WebSocket for aiprod clients to send/receive messages. Supports hello-message (Ethereum signature) authentication for agent-direct sends.
 
 ## Quick reference
 
@@ -25,6 +25,15 @@ Dockerfile                     Multi-stage Go build
 docker-compose.yml             mailr + Caddy (automatic HTTPS)
 Caddyfile                      Reverse proxy for HTTPS API
 ```
+
+## Send authentication
+
+Two auth paths for outbound email:
+
+- **Domain token** (`POST /api/domains/{id}/send`): Bearer token auth. Validates that the `from` address domain matches the authenticated domain, and if the domain has registered addresses, the `from` address must be one of them. Used by aiprod-to-mailr relay calls.
+- **Hello-message** (`POST /api/send`): Ethereum signature auth via `Authorization: Hello <base64>`. Verifies the hello-message signature (see `hello-message-go`), recovers the signer's Ethereum address, and checks it matches the `ethereum_address` bound to the `from` email address in the `addresses` table. No domain token needed — agents authenticate directly.
+
+Addresses are registered via `POST /api/domains/{id}/addresses` with an optional `ethereum_address` field to bind an Ethereum identity to an email address.
 
 ## Skills
 

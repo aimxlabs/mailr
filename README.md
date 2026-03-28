@@ -172,12 +172,25 @@ POST   /api/domains/:id/dkim/generate     Generate DKIM key pair
 Authenticated with the domain's auth token (returned when the domain is created).
 
 ```
+POST   /api/domains/:id/addresses         Register an email address
+GET    /api/domains/:id/addresses         List registered addresses
+DELETE /api/domains/:id/addresses/:aid    Delete an address
 POST   /api/domains/:id/send             Send an outbound email
 GET    /api/domains/:id/messages/poll     Poll for inbound messages
 POST   /api/domains/:id/messages/ack      Acknowledge received messages
 GET    /api/domains/:id/messages          List messages (filterable)
 GET    /api/domains/:id/messages/:mid     Get a specific message
 ```
+
+### Hello-Message Authenticated Send
+
+Agents can send email directly using Ethereum signature authentication — no domain token needed.
+
+```
+POST   /api/send                          Send email (Authorization: Hello <base64>)
+```
+
+The `from` address must be registered with a bound `ethereum_address`. The hello-message signer must match that address.
 
 ### Infrastructure
 
@@ -315,14 +328,20 @@ In relay mode, aiprod:
 - Disables its own SMTP server (mailr handles port 25)
 - All existing `/api/v1/email/*` endpoints work identically — the relay is transparent to agents
 
-Agents can also register addresses via mailr's API so only mail to registered addresses is accepted:
+Agents can also register addresses via mailr's API so only mail to registered addresses is accepted. Bind an Ethereum address to enable hello-message authenticated sending:
 
 ```bash
-# Register an address for an agent
+# Register an address for an agent with Ethereum identity binding
 curl -X POST https://mail.example.com/api/domains/dom_abc123/addresses \
   -H "Authorization: Bearer tok_xyz789" \
   -H "Content-Type: application/json" \
-  -d '{"local_part": "deploy-agent", "label": "Deployment Agent"}'
+  -d '{"local_part": "deploy-agent", "label": "Deployment Agent", "ethereum_address": "0x2c7536e3..."}'
+
+# Agent sends directly via hello-message auth (no domain token needed)
+curl -X POST https://mail.example.com/api/send \
+  -H "Authorization: Hello eyJtZXNzYWdlIjoi..." \
+  -H "Content-Type: application/json" \
+  -d '{"from": "deploy-agent@mail.example.com", "to": ["alice@gmail.com"], "subject": "Build complete", "body_text": "Done."}'
 
 # Poll for just that agent's mail
 curl "https://mail.example.com/api/domains/dom_abc123/messages/poll?address_id=addr_..." \
