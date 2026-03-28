@@ -210,6 +210,7 @@ func newManageCmd() *cobra.Command {
 			var out string
 
 			fmt.Println("Rebuilding...")
+			compose(h, k, u, d, "down")
 			out, err = compose(h, k, u, d, "up -d --build")
 			fmt.Println(out)
 			if err != nil { return err }
