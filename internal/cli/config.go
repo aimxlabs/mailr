@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"net/url"
 	"os"
 	"path/filepath"
 )
@@ -42,9 +43,22 @@ func saveConfig(c *Config) error {
 	return os.WriteFile(configPath(), data, 0600)
 }
 
+// hostnameFromURL extracts the hostname from a URL, returning "" for
+// localhost or parse failures.
+func hostnameFromURL(raw string) string {
+	if raw == "" { return "" }
+	u, err := url.Parse(raw)
+	if err != nil { return "" }
+	h := u.Hostname()
+	if h == "localhost" || h == "127.0.0.1" { return "" }
+	return h
+}
+
 func (c *Config) resolveHost() string {
 	if v := os.Getenv("MAILR_HOST"); v != "" { return v }
 	if c.RemoteHost != "" { return c.RemoteHost }
+	if h := hostnameFromURL(os.Getenv("MAILR_SERVER")); h != "" { return h }
+	if h := hostnameFromURL(c.ServerURL); h != "" { return h }
 	return ""
 }
 
