@@ -211,7 +211,8 @@ cat > ~/.mailr/config.json <<CONF
   "remoteHost": "<PUBLIC_IP>",
   "sshKey": "$HOME/.ssh/mailr-deploy-key.pem",
   "sshUser": "ubuntu",
-  "remoteDir": "/opt/mailr"
+  "remoteDir": "/opt/mailr",
+  "serverUrl": "https://<DOMAIN>"
 }
 CONF
 ```
